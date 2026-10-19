@@ -1,7 +1,57 @@
-**commande docker database:** docker run -d -v "./DataBase/data:/var/lib/postgresql/data" --network app-network --name database Bastien/database
-**commande docker adminer** docker run -p "8090:8080" --net=app-network --name=adminer -d adminer
+## How to run the project
 
+The project is made of 3 containers on the same Docker network: the database (`DataBase/`), the API (`Backend/`, Spring Boot project, container `simpleapi`) and the Apache reverse proxy (`HttpServer/`). Adminer is optional.
 
+```
+Browser --:80--> httpserver (Apache) --> simpleapi:8080 (Spring Boot) --> database:5432 (Postgres)
+```
+
+**Prerequisites:** Docker. The API is built from `Backend/` with its multistage `Dockerfile` (see 1-4). Java and Maven are not needed on the host, the build is done inside Docker.
+
+**1. Create the network** (once):
+
+```bash
+docker network create app-network
+```
+
+**2. Database:**
+
+```bash
+docker build -t Bastien/database ./DataBase
+docker run -d -v db-data:/var/lib/postgresql/data --network app-network --name database Bastien/database
+```
+
+The container must be named `database`: the API connects to `jdbc:postgresql://database:5432/db` with user `usr` / password `pwd` (`Backend/src/main/resources/application.yml`).
+
+**3. API:**
+
+```bash
+docker build -t bastien/simpleapi ./Backend
+docker run -d --name simpleapi --network app-network bastien/simpleapi
+```
+
+The container must be named `simpleapi`: it is the name used by the reverse proxy. No `-p` is needed, the API is only reached through the proxy (add `-p 8080:8080` only to test it directly).
+
+**4. HTTP server / reverse proxy:**
+
+```bash
+docker build -t bastien/httpserver ./HttpServer
+docker run -d --name httpserver --network app-network -p 80:80 bastien/httpserver
+```
+
+**5. Adminer** (optional, to browse the database):
+
+```bash
+docker run -d -p "8090:8080" --net=app-network --name=adminer adminer
+```
+
+**Check:**
+
+- http://localhost/ : API through the reverse proxy (`{"id":1,"content":"Hello, World!"}`)
+- http://localhost:8090 : Adminer (System `PostgreSQL`, Server `database`, Username `usr`, Password `pwd`, Database `db`)
+- `docker ps` and `docker logs <container>` if something does not answer
+
+Start order matters: database, then API, then proxy.
 
 ## Question
 ### 1-1 Why use `-e` at runtime instead of putting environment variables in the Dockerfile?
@@ -16,7 +66,7 @@ It is better to pass environment variables with `-e` when running the container 
 
 A container's filesystem is temporary: when the container is removed (`docker rm`), everything written inside it is lost, including the database files stored in `/var/lib/postgresql/data`.
 
-Attaching a volume (here a bind mount to `DataBase/data` on the host) stores these files outside the container, so:
+Attaching a volume (here a named Docker volume `db-data`, managed by Docker instead of a folder on the host) stores these files outside the container, so:
 
 - **Persistence:** the data survives when the container is stopped, removed, or recreated (for example after rebuilding the image).
 - **Decoupling data from the container:** the container can be replaced at any time without losing the database.
@@ -50,8 +100,8 @@ docker network create app-network
 # Build the image (from the DataBase/ folder)
 docker build -t Bastien/database .
 
-# Run the database with a volume to persist the data (run from the project root, the path must start with ./)
-docker run -d -v "./DataBase/data:/var/lib/postgresql/data" --network app-network --name database Bastien/database
+# Run the database with a named volume to persist the data (Docker creates db-data if it does not exist)
+docker run -d -v db-data:/var/lib/postgresql/data --network app-network --name database Bastien/database
 
 # Run Adminer to manage the database from the browser
 docker run -d -p "8090:8080" --net=app-network --name=adminer adminer
@@ -112,3 +162,31 @@ ENTRYPOINT ["java", "-jar", "myapp.jar"]
 
 
 docker run -d -p 8080:8080 --name simpleapi --network app-network bastien/simpleapi
+
+docker run -d --name httpserver --network app-network -p 80:80 bastien/httpserver
+### 1-5 Why do we need a reverse proxy?
+
+A reverse proxy is a server placed in front of the application: clients only talk to it, and it forwards their requests to the backend, then sends the backend's response back to the client. Here, the Apache `httpserver` container receives requests on port 80 and forwards them to the `simpleapi` container on port 8080.
+
+- **Security:** only the reverse proxy is exposed to the outside. The backend and the database stay inside the Docker network (`app-network`) and cannot be reached directly. Clients do not even know the backend exists.
+- **Single entry point:** all the services (API, front-end, ...) are reachable through the same address and port, and the proxy routes each request to the right container depending on the URL.
+- **SSL/HTTPS in one place:** HTTPS certificates are configured only on the proxy, the backend can keep talking plain HTTP inside the network.
+- **Load balancing and high availability:** the proxy can spread the requests between several backend instances and stop sending traffic to an instance that is down (`balancer://` in Apache).
+- **Other shared features:** the proxy can also serve static files, compress responses, add caching, logging or authentication, without changing the application code.
+
+**Configuration** (`HttpServer/httpd.conf`, copied into the image by the Dockerfile):
+
+```apache
+LoadModule proxy_module modules/mod_proxy.so
+LoadModule proxy_http_module modules/mod_proxy_http.so
+
+<VirtualHost *:80>
+ProxyPreserveHost On
+ProxyPass / http://simpleapi:8080/
+ProxyPassReverse / http://simpleapi:8080/
+</VirtualHost>
+```
+
+- `ProxyPass`: every request received on `/` is forwarded to the backend. `simpleapi` is the name of the backend container, resolved by Docker because both containers are on `app-network`.
+- `ProxyPassReverse`: rewrites the `Location` headers sent by the backend (redirections) so they point to the proxy and not to the internal backend address.
+- `ProxyPreserveHost On`: keeps the original `Host` header of the client when forwarding the request.
