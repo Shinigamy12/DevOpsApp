@@ -18,16 +18,16 @@ docker network create app-network
 
 ```bash
 docker build -t Bastien/database ./DataBase
-docker run -d -v db-data:/var/lib/postgresql/data --network app-network --name database Bastien/database
+docker run -d -v db-data:/var/lib/postgresql/data --network app-network --env-file .env --name database Bastien/database
 ```
 
-The container must be named `database`: the API connects to `jdbc:postgresql://database:5432/db` with user `usr` / password `pwd` (`Backend/src/main/resources/application.yml`).
+The container must be named `database`: the API connects to `jdbc:postgresql://database:5432/${POSTGRES_DB}` (`Backend/src/main/resources/application.yml`). The database name, user and password are not in the code: they are in the `.env` file at the root (not committed, copy `.env.example` to `.env` and fill it).
 
 **3. API:**
 
 ```bash
 docker build -t bastien/simpleapi ./Backend
-docker run -d --name simpleapi --network app-network bastien/simpleapi
+docker run -d --name simpleapi --network app-network --env-file .env bastien/simpleapi
 ```
 
 The container must be named `simpleapi`: it is the name used by the reverse proxy. No `-p` is needed, the API is only reached through the proxy (add `-p 8080:8080` only to test it directly).
@@ -48,7 +48,7 @@ docker run -d -p "8090:8080" --net=app-network --name=adminer adminer
 **Check:**
 
 - http://localhost/ : API through the reverse proxy (`{"id":1,"content":"Hello, World!"}`)
-- http://localhost:8090 : Adminer (System `PostgreSQL`, Server `database`, Username `usr`, Password `pwd`, Database `db`)
+- http://localhost:8090 : Adminer (System `PostgreSQL`, Server `database`, Username / Password / Database: `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` from `.env`)
 - `docker ps` and `docker logs <container>` if something does not answer
 
 Start order matters: database, then API, then proxy.
@@ -79,16 +79,12 @@ Attaching a volume (here a named Docker volume `db-data`, managed by Docker inst
 ```dockerfile
 FROM postgres:17.2-alpine
 
-ENV POSTGRES_DB=db \
-    POSTGRES_USER=usr \
-    POSTGRES_PASSWORD=pwd
-
 COPY CreateScheme.sql /docker-entrypoint-initdb.d/01-CreateScheme.sql
 COPY InsertData.sql /docker-entrypoint-initdb.d/02-InsertData.sql
 ```
 
 - `FROM postgres:17.2-alpine`: official Postgres image, lightweight Alpine version.
-- `ENV`: database name, user and password used when the database is created (they could also be passed at runtime with `-e`, see 1-1).
+- No `ENV`: the database name, user and password (`POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`) are passed at runtime from the `.env` file (`--env-file .env`, or `env_file` in docker-compose), so they are not stored in the image nor in Git (see 1-1).
 - `COPY ... /docker-entrypoint-initdb.d/`: SQL scripts run automatically, in alphabetical order, the first time the database is initialized. The `01-` / `02-` prefixes make sure the tables are created before the data is inserted.
 
 **Commands:**
@@ -97,17 +93,18 @@ COPY InsertData.sql /docker-entrypoint-initdb.d/02-InsertData.sql
 # Create a network so the containers can reach each other by name
 docker network create app-network
 
-# Build the image (from the DataBase/ folder)
-docker build -t Bastien/database .
+# Build the image (from the repository root)
+docker build -t Bastien/database ./DataBase
 
 # Run the database with a named volume to persist the data (Docker creates db-data if it does not exist)
-docker run -d -v db-data:/var/lib/postgresql/data --network app-network --name database Bastien/database
+# and the credentials from the .env file
+docker run -d -v db-data:/var/lib/postgresql/data --network app-network --env-file .env --name database Bastien/database
 
 # Run Adminer to manage the database from the browser
 docker run -d -p "8090:8080" --net=app-network --name=adminer adminer
 ```
 
-**Adminer connection** (http://localhost:8090): System `PostgreSQL`, Server `database`, Username `usr`, Password `pwd`, Database `db`.
+**Adminer connection** (http://localhost:8090): System `PostgreSQL`, Server `database`, Username / Password / Database: the values of `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` in `.env`.
 
 
 docker run -d --name backend Bastien/backend  
@@ -161,7 +158,7 @@ ENTRYPOINT ["java", "-jar", "myapp.jar"]
 - `ENTRYPOINT ["java", "-jar", "myapp.jar"]`: command run when the container starts: launch the application with the JRE.
 
 
-docker run -d -p 8080:8080 --name simpleapi --network app-network bastien/simpleapi
+docker run -d -p 8080:8080 --name simpleapi --network app-network --env-file .env bastien/simpleapi
 
 docker run -d --name httpserver --network app-network -p 80:80 bastien/httpserver
 ### 1-5 Why do we need a reverse proxy?
@@ -190,3 +187,104 @@ ProxyPassReverse / http://simpleapi:8080/
 - `ProxyPass`: every request received on `/` is forwarded to the backend. `simpleapi` is the name of the backend container, resolved by Docker because both containers are on `app-network`.
 - `ProxyPassReverse`: rewrites the `Location` headers sent by the backend (redirections) so they point to the proxy and not to the internal backend address.
 - `ProxyPreserveHost On`: keeps the original `Host` header of the client when forwarding the request.
+
+### 1-6 Why is docker-compose so important?
+
+Without Compose, the whole stack needs about ten commands run by hand, in the right order and with the right options: create the network, build three images, run three containers with their names, volumes, ports and network. Docker Compose describes all of that in a single file (`docker-compose.yml`) and runs it with one command.
+
+- **One command for the whole stack:** `docker compose up --build` builds the images, creates the network and the volume, and starts the containers in the right order.
+- **Configuration as code:** the setup is written in a file versioned in Git, so it is documented, reviewable and the same for everyone (no forgotten `--network` or `-v` option).
+- **Reproducible:** any developer (or CI) gets the exact same environment by cloning the repository.
+- **Dependencies between services:** `depends_on` defines the start order (database, then API, then proxy).
+- **Easy to manage:** stop, restart, rebuild, read the logs or remove the whole application at once instead of container by container.
+
+### 1-7 Document docker-compose most important commands.
+
+```bash
+# Build the images (if needed) and start all the services in the background
+docker compose up -d --build
+
+# List the containers of the project and their status
+docker compose ps
+
+# Show the logs of all services (-f to follow), or of one service
+docker compose logs -f
+docker compose logs backend
+
+# Rebuild the images without starting them
+docker compose build
+
+# Restart one service, or stop / start the stack without removing it
+docker compose restart backend
+docker compose stop
+docker compose start
+
+# Run a command inside a running service
+docker compose exec database sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+
+# Stop and remove the containers and the network (-v also removes the volumes, so the data)
+docker compose down
+docker compose down -v
+
+# Check the docker-compose.yml file and print the final config
+docker compose config
+```
+
+### 1-8 Document your docker-compose file.
+
+```yaml
+services:
+  backend:
+    build: ./Backend
+    env_file: .env
+    networks:
+      - app-network
+      - db-network
+    depends_on:
+      - database
+    restart: unless-stopped
+
+  database:
+    build: ./DataBase
+    env_file: .env
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    networks:
+      - db-network
+
+  httpd:
+    build: ./HttpServer
+    ports:
+      - "80:80"
+    networks:
+      - app-network
+    depends_on:
+      - backend
+
+networks:
+  app-network:
+  db-network:
+
+volumes:
+  db-data:
+```
+
+- `services`: the three containers of the application. Compose names the containers `devopsapp-<service>-1` and each service can be reached by the others with its service name.
+- `backend`: the Spring Boot API.
+  - `build: ./Backend`: build the image from the multistage `Dockerfile` in `Backend/` (see 1-4).
+  - `env_file: .env`: give the database name, user and password to the API, used by `application.yml` (`${POSTGRES_DB}`, `${POSTGRES_USER}`, `${POSTGRES_PASSWORD}`).
+  - `networks`: on `app-network` to be reached by the proxy, and on `db-network` to reach the database.
+  - `depends_on: database`: start the database before the API.
+  - `restart: unless-stopped`: restart the API if it crashes (for example if it started before Postgres was ready), unless it was stopped by hand.
+- `database`: the Postgres database.
+  - `build: ./DataBase`: build the image that runs the SQL scripts at the first start (see 1-3).
+  - `env_file: .env`: create the database with the name, user and password of `.env`.
+  - `volumes: db-data:/var/lib/postgresql/data`: keep the data in a named volume, so it is not lost when the container is removed (see 1-2). It is reached by the API as `database:5432`, the host of `application.yml`.
+- `httpd`: the Apache reverse proxy.
+  - `build: ./HttpServer`: build the image with our `httpd.conf` (see 1-5).
+  - `ports: "80:80"`: the only port published on the host: everything goes through the proxy, the API and the database are not reachable from outside.
+  - `depends_on: backend`: start the API before the proxy.
+- `networks`: two bridge networks created by Compose. `app-network` connects the proxy and the API, `db-network` connects the API and the database, so the proxy cannot reach the database.
+- `volumes: db-data`: the named volume created by Compose (`devopsapp_db-data`).
+
+Note: `depends_on` only waits for the container to be started, not for the application to be ready (Postgres may still be starting when the API starts).

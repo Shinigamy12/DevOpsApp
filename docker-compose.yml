@@ -1,0 +1,34 @@
+services:
+  backend:
+    build: ./Backend
+    env_file: .env
+    networks:
+      - app-network
+      - db-network
+    depends_on:
+      - database
+    restart: unless-stopped
+
+  database:
+    build: ./DataBase
+    env_file: .env
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    networks:
+      - db-network
+
+  httpd:
+    build: ./HttpServer
+    ports:
+      - "80:80"
+    networks:
+      - app-network
+    depends_on:
+      - backend
+
+networks:
+  app-network:
+  db-network:
+
+volumes:
+  db-data:
