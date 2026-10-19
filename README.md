@@ -58,3 +58,57 @@ docker run -d -p "8090:8080" --net=app-network --name=adminer adminer
 ```
 
 **Adminer connection** (http://localhost:8090): System `PostgreSQL`, Server `database`, Username `usr`, Password `pwd`, Database `db`.
+
+
+docker run -d --name backend Bastien/backend  
+### 1-4 Why do we need a multistage build? And explain each step of this dockerfile.
+
+A multistage build lets us use several `FROM` stages in one Dockerfile and keep only what we need in the final image:
+
+- **Smaller image:** the JDK and Maven (needed to compile and package the app) stay in the build stage. The final image only contains the JRE and the `.jar`, so it is much lighter.
+- **Security:** fewer tools in the final image (no compiler, no Maven, no source code) means a smaller attack surface.
+- **One single Dockerfile:** build and run are described in the same file, no need to have Java or Maven installed on the host. The build is reproducible.
+
+**Dockerfile:**
+
+```dockerfile
+# Build stage
+FROM eclipse-temurin:21-jdk-alpine AS myapp-build
+ENV MYAPP_HOME=/opt/myapp
+WORKDIR $MYAPP_HOME
+
+RUN apk add --no-cache maven
+
+COPY pom.xml .
+COPY src ./src
+RUN mvn package -DskipTests
+
+# Run stage
+FROM eclipse-temurin:21-jre-alpine
+ENV MYAPP_HOME=/opt/myapp
+WORKDIR $MYAPP_HOME
+COPY --from=myapp-build $MYAPP_HOME/target/*.jar $MYAPP_HOME/myapp.jar
+
+ENTRYPOINT ["java", "-jar", "myapp.jar"]
+```
+
+**Build stage:**
+
+- `FROM eclipse-temurin:21-jdk-alpine AS myapp-build`: start from a JDK 21 image (needed to compile Java). The stage is named `myapp-build` so the next stage can refer to it.
+- `ENV MYAPP_HOME=/opt/myapp`: define a variable with the app folder, to avoid repeating the path.
+- `WORKDIR $MYAPP_HOME`: create this folder and move into it for the next commands.
+- `RUN apk add --no-cache maven`: install Maven with the Alpine package manager. `--no-cache` avoids keeping the package index in the image.
+- `COPY pom.xml .`: copy the Maven project file (dependencies and build config).
+- `COPY src ./src`: copy the source code.
+- `RUN mvn package -DskipTests`: compile the code and package it into a `.jar` in `target/`. Tests are skipped to make the build faster.
+
+**Run stage:**
+
+- `FROM eclipse-temurin:21-jre-alpine`: start a new clean image with only the JRE 21 (enough to run Java, no compiler). Everything from the build stage is dropped except what we copy.
+- `ENV MYAPP_HOME=/opt/myapp`: define the variable again, because `ENV` values are not shared between stages.
+- `WORKDIR $MYAPP_HOME`: create and move into the app folder.
+- `COPY --from=myapp-build $MYAPP_HOME/target/*.jar $MYAPP_HOME/myapp.jar`: copy only the built `.jar` from the build stage and rename it `myapp.jar`.
+- `ENTRYPOINT ["java", "-jar", "myapp.jar"]`: command run when the container starts: launch the application with the JRE.
+
+
+docker run -d -p 8080:8080 --name simpleapi --network app-network bastien/simpleapi
