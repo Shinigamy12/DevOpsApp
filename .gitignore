@@ -1,0 +1,33 @@
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Environnements virtuels
+.venv/
+venv/
+env/
+
+# Secrets / config locale
+.env
+.env.*
+!.env.example
+instance/
+
+# Logs / données locales
+*.log
+*.sqlite3
+*.db
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
