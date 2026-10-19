@@ -26,6 +26,7 @@ instance/
 *.log
 *.sqlite3
 *.db
+DataBase/data/
 
 # OS
 .DS_Store
