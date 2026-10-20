@@ -16,6 +16,7 @@
 	<properties>
 		<java.version>21</java.version>
 		<jacoco-maven-plugin.version>0.8.12</jacoco-maven-plugin.version>
+		<dependency-check-maven.version>13.0.0</dependency-check-maven.version>
 		<testcontainers.version>1.21.4</testcontainers.version>
 		<validation.version>3.1.0</validation.version>
 	</properties>
@@ -111,6 +112,19 @@
 						</goals>
 					</execution>
 				</executions>
+			</plugin>
+			<plugin>
+				<groupId>org.owasp</groupId>
+				<artifactId>dependency-check-maven</artifactId>
+				<version>${dependency-check-maven.version}</version>
+				<configuration>
+					<formats>
+						<format>HTML</format>
+						<format>JSON</format>
+					</formats>
+					<!-- 11 = never fail the build for now (CVSS goes from 0 to 10) -->
+					<failBuildOnCVSS>11</failBuildOnCVSS>
+				</configuration>
 			</plugin>
 		</plugins>
 	</build>
