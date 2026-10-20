@@ -317,3 +317,46 @@ The file declares **three services**. Compose names the containers `devopsapp-<s
 - `volumes: db-data`: the named volume created by Compose (it shows up as `devopsapp_db-data`).
 
 > ⚠️ `depends_on` only waits for the container to **start**, not for the app inside to be **ready**. Postgres can still be booting when the API starts, which is why the backend has `restart: unless-stopped`.
+
+### 2-1 What are testcontainers?
+
+Testcontainers is a Java library that **starts real Docker containers during the tests** and throws them away at the end.
+
+Instead of testing against a fake, in-memory database (like H2) or a shared database that someone has to install, every test run gets a fresh, real Postgres in a container, the same engine we use in production.
+
+In this project:
+
+- The test config ([Backend/src/test/resources/application.yml](Backend/src/test/resources/application.yml)) uses the URL `jdbc:tc:postgresql://hostname/simple-api`. The `tc:` prefix tells Testcontainers to start a Postgres container automatically when the app connects to the database.
+- Each integration test (`*IT`) runs `InsertData.sql` with `@Sql`, so it always starts from the same data.
+- At the end of the tests, the container is stopped and removed. Nothing is left behind.
+
+Why it's useful:
+
+- **Realistic tests:** the SQL runs on a real Postgres, so we catch problems an in-memory database would hide.
+- **Nothing to install:** you only need Docker. No local database to set up, and the CI runner (which has Docker) works the same way.
+- **Isolated and reproducible:** every run starts from a clean database, so tests don't depend on leftovers from a previous run.
+
+> ⚠️ Testcontainers needs a Docker it can talk to. With Docker 29+, Testcontainers must be at least **1.21.4**, otherwise it fails with `Could not find a valid Docker environment`.
+
+### 2-2 For what purpose do we need to use secured variables?
+
+To **use secrets in the CI without writing them in the code.**
+
+To publish our images, the workflow has to log in to Docker Hub, so it needs a username and a password or token. If we wrote them in `main.yml`, they would be in the Git history forever, readable by anyone who can see the repository (anyone at all if it's public). Even deleting them in a later commit doesn't help, the old commits still contain them.
+
+GitHub **secrets** solve that:
+
+- **Stored outside the code:** they are saved in the repository settings (`Settings → Secrets and variables → Actions`), never in a file or a commit.
+- **Write-only:** once saved, nobody can read the value again, not even the repository owner. It can only be replaced or deleted.
+- **Hidden in the logs:** if a step prints a secret, GitHub replaces it with `***`.
+- **Not shared with forks:** a pull request from a fork doesn't get the secrets, so a stranger can't steal them by changing the workflow.
+- **Easy to change:** if a token leaks or expires, we update the secret in one place, no code change needed.
+
+In our workflow we read them like this:
+
+```yaml
+${{ secrets.DOCKERHUB_USERNAME }}
+${{ secrets.DOCKERHUB_TOKEN }}
+```
+
+We use a Docker Hub **access token** rather than the account password: it only has the rights it needs (read & write on images), and it can be revoked at any time without touching the account.
