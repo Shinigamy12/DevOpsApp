@@ -360,3 +360,37 @@ ${{ secrets.DOCKERHUB_TOKEN }}
 ```
 
 We use a Docker Hub **access token** rather than the account password: it only has the rights it needs (read & write on images), and it can be revoked at any time without touching the account.
+
+### 2-3 Why did we put `needs: build-and-test-backend` on this job?
+
+In our workflow the test job is called `test-backend`, so the line is `needs: test-backend`.
+
+By default, **all the jobs of a workflow start at the same time**, each on its own machine. Without `needs`, the Docker images would be built in parallel with the tests, and nothing would stop them if the tests fail.
+
+`needs` creates a dependency between jobs:
+
+- **Order:** `build-and-push-docker-image` waits until `test-backend` is finished before starting.
+- **Condition:** if `test-backend` fails (code doesn't compile, a test is red), the image job is **skipped**. No image is built from broken code.
+- **Safety for the next step:** once we push the images to Docker Hub, this is what prevents publishing a broken version as `latest`, which anyone (or a deployment) could pull.
+
+What happens without it:
+
+| | With `needs` | Without `needs` |
+|--|--------------|-----------------|
+| Start | Tests first, then images | Both jobs at the same time |
+| A test fails | Image job skipped | Images built (and later pushed) anyway |
+| In the Actions tab | Two jobs linked by an arrow | Two separate, unrelated jobs |
+
+It also saves time and CI minutes: no need to build three images when we already know the code is broken.
+
+### 2-4 For what purpose do we need to push docker images?
+
+Building an image in the CI is not enough: the image only exists on the GitHub runner, and **the runner is destroyed at the end of the job**. Pushing it to a registry (here Docker Hub) **stores it somewhere everyone can get it**.
+
+- **Deployment:** a server (or the next part of the pipeline, Ansible for example) can simply `docker pull` the image and run it. No need to clone the code, install Java or Maven, or build anything on the server.
+- **Build once, run anywhere:** the exact same image, tested by the CI, runs on a teammate's laptop, on staging and in production. No more "it works on my machine".
+- **Only validated code is published:** thanks to `needs: test-backend` and `push: ${{ github.ref == 'refs/heads/main' }}`, an image is only pushed when the tests pass on `main`. The `latest` tag on Docker Hub is therefore always a working version.
+- **Sharing:** anyone can start the whole app with `docker pull` (or a `docker-compose.yml` that uses `image:` instead of `build:`) without the source code.
+- **History and rollback:** the registry keeps the images. With version tags (e.g. `1.0`, `1.1` or the commit SHA, not only `latest`), we can go back to a previous version in seconds if a new one is broken.
+
+In short: **the CI builds and tests, the registry stores, the servers pull and run.**
