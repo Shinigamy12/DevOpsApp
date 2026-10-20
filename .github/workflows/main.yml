@@ -24,7 +24,7 @@ jobs:
       #finally build your app with the latest command
       #finally build your app with the latest command
       - name: Build, test and analyze with Maven
-        run: mvn -B clean verify sonar:sonar -Dsonar.projectKey=Shinigamy12_DevOpsApp -Dsonar.organization=shinigamy12 -Dsonar.host.url=https://sonarcloud.io -Dsonar.token=${{ secrets.SONAR_TOKEN }} --file Backend/pom.xml
+        run: mvn -B clean verify org.sonarsource.scanner.maven:sonar-maven-plugin:sonar-Dsonar.projectKey=Shinigamy12_DevOpsApp -Dsonar.organization=shinigamy12 -Dsonar.host.url=https://sonarcloud.io -Dsonar.token=${{ secrets.SONAR_TOKEN }} --file Backend/pom.xml
 
   # define job to build and publish docker image
   # define job to build and publish docker image
