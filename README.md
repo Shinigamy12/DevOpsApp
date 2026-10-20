@@ -1,80 +1,100 @@
 ## How to run the project
 
-The project is made of 3 containers on the same Docker network: the database (`DataBase/`), the API (`Backend/`, Spring Boot project, container `simpleapi`) and the Apache reverse proxy (`HttpServer/`). Adminer is optional.
+The app runs in 3 containers that talk to each other over a Docker network:
+
+| Container | Folder | Role |
+|-----------|--------|------|
+| `database` | `DataBase/` | Postgres database |
+| `simpleapi` | `Backend/` | Spring Boot API |
+| `httpserver` | `HttpServer/` | Apache reverse proxy, the only entry point |
+
+Adminer is optional, it's just handy to look inside the database.
 
 ```
 Browser --:80--> httpserver (Apache) --> simpleapi:8080 (Spring Boot) --> database:5432 (Postgres)
 ```
 
-**Prerequisites:** Docker. The API is built from `Backend/` with its multistage `Dockerfile` (see 1-4). Java and Maven are not needed on the host, the build is done inside Docker.
+**What you need:** only Docker. Java and Maven are not needed on your machine, the API is compiled inside Docker thanks to its multistage `Dockerfile` (see 1-4).
 
-**1. Create the network** (once):
+**Before starting:** copy `.env.example` to `.env` and fill it in. It holds the database name, user and password. It is not committed, so the secrets never end up in Git.
+
+> The fastest way is `docker compose up -d --build` (see 1-6 to 1-8). The steps below do the same thing by hand.
+
+### 1. Create the network (only once)
 
 ```bash
 docker network create app-network
 ```
 
-**2. Database:**
+### 2. Start the database
 
 ```bash
-docker build -t Bastien/database ./DataBase
-docker run -d -v db-data:/var/lib/postgresql/data --network app-network --env-file .env --name database Bastien/database
+docker build -t bastien/database ./DataBase
+docker run -d -v db-data:/var/lib/postgresql/data --network app-network --env-file .env --name database bastien/database
 ```
 
-The container must be named `database`: the API connects to `jdbc:postgresql://database:5432/${POSTGRES_DB}` (`Backend/src/main/resources/application.yml`). The database name, user and password are not in the code: they are in the `.env` file at the root (not committed, copy `.env.example` to `.env` and fill it).
+> ⚠️ The container **must** be called `database`. The API connects to `jdbc:postgresql://database:5432/${POSTGRES_DB}` (see `Backend/src/main/resources/application.yml`).
 
-**3. API:**
+### 3. Start the API
 
 ```bash
 docker build -t bastien/simpleapi ./Backend
 docker run -d --name simpleapi --network app-network --env-file .env bastien/simpleapi
 ```
 
-The container must be named `simpleapi`: it is the name used by the reverse proxy. No `-p` is needed, the API is only reached through the proxy (add `-p 8080:8080` only to test it directly).
+> ⚠️ The container **must** be called `simpleapi`, that's the name the reverse proxy looks for.
+>
+> No `-p` here: the API is only reachable through the proxy. Add `-p 8080:8080` if you want to test it directly.
 
-**4. HTTP server / reverse proxy:**
+### 4. Start the reverse proxy
 
 ```bash
 docker build -t bastien/httpserver ./HttpServer
 docker run -d --name httpserver --network app-network -p 80:80 bastien/httpserver
 ```
 
-**5. Adminer** (optional, to browse the database):
+### 5. Adminer (optional)
 
 ```bash
 docker run -d -p "8090:8080" --net=app-network --name=adminer adminer
 ```
 
-**Check:**
+### Is it working?
 
-- http://localhost/ : API through the reverse proxy (`{"id":1,"content":"Hello, World!"}`)
-- http://localhost:8090 : Adminer (System `PostgreSQL`, Server `database`, Username / Password / Database: `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` from `.env`)
-- `docker ps` and `docker logs <container>` if something does not answer
+- **http://localhost/** should answer `{"id":1,"content":"Hello, World!"}` (the API, through the proxy).
+- **http://localhost:8090** opens Adminer. Log in with:
+  - System: `PostgreSQL`
+  - Server: `database`
+  - Username / Password / Database: `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` from your `.env`
+- Something doesn't answer? Check `docker ps` and `docker logs <container>`.
 
-Start order matters: database, then API, then proxy.
+> The start order matters: **database → API → proxy**.
 
-## Question
+---
+
+## Questions
+
 ### 1-1 Why use `-e` at runtime instead of putting environment variables in the Dockerfile?
 
-It is better to pass environment variables with `-e` when running the container because:
+In short: **secrets don't belong in an image.**
 
-- **Security:** sensitive values (passwords, API keys, tokens) are not hardcoded in the Dockerfile. Anything written in the Dockerfile with `ENV` is stored in the image layers and can be read by anyone who has the image (`docker history`, `docker inspect`), or by anyone who can see the Dockerfile in the Git repository.
-- **Flexibility / reusability:** the same image can be used in different environments (dev, test, prod) with different values (database name, user, password) without rebuilding the image.
-- **Separation of configuration and code:** the image contains the application, and the configuration is given at runtime. This follows the "12-factor app" principle.
+- **Security.** Anything you write with `ENV` in a Dockerfile is baked into the image layers. Anyone who has the image can read it with `docker history` or `docker inspect`, and anyone who can see the repo can read the Dockerfile. Passwords, API keys and tokens should never be there.
+- **One image, many environments.** The same image works in dev, test and prod. You just give it different values (database name, user, password) when you start it, no rebuild needed.
+- **Code and config stay separate.** The image is the application, the config comes at runtime. That's one of the "12-factor app" principles.
 
 ### 1-2 Why do we need a volume to be attached to our postgres container?
 
-A container's filesystem is temporary: when the container is removed (`docker rm`), everything written inside it is lost, including the database files stored in `/var/lib/postgresql/data`.
+Because **a container forgets everything when it's removed.** If you `docker rm` the Postgres container, all the files in `/var/lib/postgresql/data`, so the whole database, are gone.
 
-Attaching a volume (here a named Docker volume `db-data`, managed by Docker instead of a folder on the host) stores these files outside the container, so:
+A volume stores those files outside the container. Here we use a named volume, `db-data`, managed by Docker (not a folder on the host). That gives us:
 
-- **Persistence:** the data survives when the container is stopped, removed, or recreated (for example after rebuilding the image).
-- **Decoupling data from the container:** the container can be replaced at any time without losing the database.
-- **Initialization only once:** Postgres runs the scripts in `/docker-entrypoint-initdb.d/` only if the data directory is empty. With a volume, the database is initialized the first time and then reused on every restart.
+- **Persistence:** the data survives a stop, a removal or a rebuild of the container.
+- **Replaceable containers:** we can throw the container away and create a new one anytime without losing anything.
+- **Initialization only once:** Postgres only runs the scripts in `/docker-entrypoint-initdb.d/` when the data folder is empty. With a volume, the database is set up the first time and simply reused afterwards.
 
 ### 1-3 Document your database container essentials: commands and Dockerfile.
 
-**Dockerfile** (`DataBase/Dockerfile`):
+**The Dockerfile** (`DataBase/Dockerfile`):
 
 ```dockerfile
 FROM postgres:17.2-alpine
@@ -83,40 +103,42 @@ COPY CreateScheme.sql /docker-entrypoint-initdb.d/01-CreateScheme.sql
 COPY InsertData.sql /docker-entrypoint-initdb.d/02-InsertData.sql
 ```
 
-- `FROM postgres:17.2-alpine`: official Postgres image, lightweight Alpine version.
-- No `ENV`: the database name, user and password (`POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`) are passed at runtime from the `.env` file (`--env-file .env`, or `env_file` in docker-compose), so they are not stored in the image nor in Git (see 1-1).
-- `COPY ... /docker-entrypoint-initdb.d/`: SQL scripts run automatically, in alphabetical order, the first time the database is initialized. The `01-` / `02-` prefixes make sure the tables are created before the data is inserted.
+| Line | What it does |
+|------|--------------|
+| `FROM postgres:17.2-alpine` | Starts from the official Postgres image, in its lightweight Alpine version. |
+| `COPY ... /docker-entrypoint-initdb.d/` | Postgres runs every script in this folder automatically, in alphabetical order, the first time the database is created. The `01-` / `02-` prefixes make sure the tables exist before the data is inserted. |
 
-**Commands:**
+You'll notice there is **no `ENV`**. The database name, user and password (`POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`) come from the `.env` file at runtime (`--env-file .env`, or `env_file` in docker-compose). That way they are neither in the image nor in Git (see 1-1).
+
+**The commands:**
 
 ```bash
-# Create a network so the containers can reach each other by name
+# Create a network so the containers can find each other by name
 docker network create app-network
 
 # Build the image (from the repository root)
-docker build -t Bastien/database ./DataBase
+docker build -t bastien/database ./DataBase
 
-# Run the database with a named volume to persist the data (Docker creates db-data if it does not exist)
-# and the credentials from the .env file
-docker run -d -v db-data:/var/lib/postgresql/data --network app-network --env-file .env --name database Bastien/database
+# Run the database:
+#  - with the db-data volume to keep the data (Docker creates it if needed)
+#  - with the credentials from .env
+docker run -d -v db-data:/var/lib/postgresql/data --network app-network --env-file .env --name database bastien/database
 
-# Run Adminer to manage the database from the browser
+# Run Adminer to browse the database from the browser
 docker run -d -p "8090:8080" --net=app-network --name=adminer adminer
 ```
 
-**Adminer connection** (http://localhost:8090): System `PostgreSQL`, Server `database`, Username / Password / Database: the values of `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` in `.env`.
+**Connecting with Adminer** (http://localhost:8090): System `PostgreSQL`, Server `database`, and for Username / Password / Database the values of `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` in `.env`.
 
-
-docker run -d --name backend Bastien/backend  
 ### 1-4 Why do we need a multistage build? And explain each step of this dockerfile.
 
-A multistage build lets us use several `FROM` stages in one Dockerfile and keep only what we need in the final image:
+To build a Java app you need a JDK and Maven. To run it, you only need a JRE and the `.jar`. A multistage build lets us use the heavy tools in a first stage, then **keep only what's needed to run the app** in the final image.
 
-- **Smaller image:** the JDK and Maven (needed to compile and package the app) stay in the build stage. The final image only contains the JRE and the `.jar`, so it is much lighter.
-- **Security:** fewer tools in the final image (no compiler, no Maven, no source code) means a smaller attack surface.
-- **One single Dockerfile:** build and run are described in the same file, no need to have Java or Maven installed on the host. The build is reproducible.
+- **Smaller image:** the JDK and Maven stay behind in the build stage. The final image only has the JRE and the `.jar`.
+- **More secure:** no compiler, no Maven, no source code in production means fewer things to attack.
+- **Everything in one file:** build and run are described in the same Dockerfile. Nobody needs Java or Maven installed, and the build is the same on every machine.
 
-**Dockerfile:**
+**The Dockerfile:**
 
 ```dockerfile
 # Build stage
@@ -139,39 +161,41 @@ COPY --from=myapp-build $MYAPP_HOME/target/*.jar $MYAPP_HOME/myapp.jar
 ENTRYPOINT ["java", "-jar", "myapp.jar"]
 ```
 
-**Build stage:**
+**Stage 1: build the app**
 
-- `FROM eclipse-temurin:21-jdk-alpine AS myapp-build`: start from a JDK 21 image (needed to compile Java). The stage is named `myapp-build` so the next stage can refer to it.
-- `ENV MYAPP_HOME=/opt/myapp`: define a variable with the app folder, to avoid repeating the path.
-- `WORKDIR $MYAPP_HOME`: create this folder and move into it for the next commands.
-- `RUN apk add --no-cache maven`: install Maven with the Alpine package manager. `--no-cache` avoids keeping the package index in the image.
-- `COPY pom.xml .`: copy the Maven project file (dependencies and build config).
-- `COPY src ./src`: copy the source code.
-- `RUN mvn package -DskipTests`: compile the code and package it into a `.jar` in `target/`. Tests are skipped to make the build faster.
+| Line | What it does |
+|------|--------------|
+| `FROM eclipse-temurin:21-jdk-alpine AS myapp-build` | Starts from a JDK 21 image, needed to compile Java. The stage is named `myapp-build` so the next stage can refer to it. |
+| `ENV MYAPP_HOME=/opt/myapp` | Stores the app folder in a variable so we don't repeat the path. |
+| `WORKDIR $MYAPP_HOME` | Creates that folder and moves into it. |
+| `RUN apk add --no-cache maven` | Installs Maven with Alpine's package manager. `--no-cache` avoids keeping the package index in the image. |
+| `COPY pom.xml .` | Copies the Maven project file (dependencies and build settings). |
+| `COPY src ./src` | Copies the source code. |
+| `RUN mvn package -DskipTests` | Compiles the code and packages it into a `.jar` in `target/`. Tests are skipped to build faster. |
 
-**Run stage:**
+**Stage 2: run the app**
 
-- `FROM eclipse-temurin:21-jre-alpine`: start a new clean image with only the JRE 21 (enough to run Java, no compiler). Everything from the build stage is dropped except what we copy.
-- `ENV MYAPP_HOME=/opt/myapp`: define the variable again, because `ENV` values are not shared between stages.
-- `WORKDIR $MYAPP_HOME`: create and move into the app folder.
-- `COPY --from=myapp-build $MYAPP_HOME/target/*.jar $MYAPP_HOME/myapp.jar`: copy only the built `.jar` from the build stage and rename it `myapp.jar`.
-- `ENTRYPOINT ["java", "-jar", "myapp.jar"]`: command run when the container starts: launch the application with the JRE.
+| Line | What it does |
+|------|--------------|
+| `FROM eclipse-temurin:21-jre-alpine` | Starts a brand new, clean image with only the JRE 21 (enough to run Java, no compiler). Nothing from stage 1 is kept unless we copy it. |
+| `ENV MYAPP_HOME=/opt/myapp` | Defines the variable again, because `ENV` is not shared between stages. |
+| `WORKDIR $MYAPP_HOME` | Creates the app folder and moves into it. |
+| `COPY --from=myapp-build $MYAPP_HOME/target/*.jar $MYAPP_HOME/myapp.jar` | Grabs only the built `.jar` from stage 1 and renames it `myapp.jar`. |
+| `ENTRYPOINT ["java", "-jar", "myapp.jar"]` | The command run when the container starts: launches the app. |
 
-
-docker run -d -p 8080:8080 --name simpleapi --network app-network --env-file .env bastien/simpleapi
-
-docker run -d --name httpserver --network app-network -p 80:80 bastien/httpserver
 ### 1-5 Why do we need a reverse proxy?
 
-A reverse proxy is a server placed in front of the application: clients only talk to it, and it forwards their requests to the backend, then sends the backend's response back to the client. Here, the Apache `httpserver` container receives requests on port 80 and forwards them to the `simpleapi` container on port 8080.
+A reverse proxy is a server that **sits in front of the application**. Clients only ever talk to it: it forwards their requests to the backend and sends the answer back. Here, the Apache `httpserver` container listens on port 80 and forwards everything to `simpleapi` on port 8080.
 
-- **Security:** only the reverse proxy is exposed to the outside. The backend and the database stay inside the Docker network (`app-network`) and cannot be reached directly. Clients do not even know the backend exists.
-- **Single entry point:** all the services (API, front-end, ...) are reachable through the same address and port, and the proxy routes each request to the right container depending on the URL.
-- **SSL/HTTPS in one place:** HTTPS certificates are configured only on the proxy, the backend can keep talking plain HTTP inside the network.
-- **Load balancing and high availability:** the proxy can spread the requests between several backend instances and stop sending traffic to an instance that is down (`balancer://` in Apache).
-- **Other shared features:** the proxy can also serve static files, compress responses, add caching, logging or authentication, without changing the application code.
+Why it's worth it:
 
-**Configuration** (`HttpServer/httpd.conf`, copied into the image by the Dockerfile):
+- **Security:** only the proxy is exposed. The API and the database stay hidden inside the Docker network, clients can't reach them and don't even know they exist.
+- **One entry point:** all services (API, front-end, ...) are behind the same address and port. The proxy sends each request to the right container based on the URL.
+- **HTTPS in one place:** certificates are only set up on the proxy. Behind it, the backend can keep using plain HTTP.
+- **Load balancing:** the proxy can spread requests over several backend instances and skip the ones that are down (`balancer://` in Apache).
+- **Extras for free:** static files, compression, caching, logging, authentication... all without touching the app code.
+
+**The configuration** (`HttpServer/httpd.conf`, copied into the image by the Dockerfile):
 
 ```apache
 LoadModule proxy_module modules/mod_proxy.so
@@ -184,51 +208,40 @@ ProxyPassReverse / http://simpleapi:8080/
 </VirtualHost>
 ```
 
-- `ProxyPass`: every request received on `/` is forwarded to the backend. `simpleapi` is the name of the backend container, resolved by Docker because both containers are on `app-network`.
-- `ProxyPassReverse`: rewrites the `Location` headers sent by the backend (redirections) so they point to the proxy and not to the internal backend address.
-- `ProxyPreserveHost On`: keeps the original `Host` header of the client when forwarding the request.
+| Directive | What it does |
+|-----------|--------------|
+| `LoadModule proxy_module` / `proxy_http_module` | Enables Apache's proxy features, and HTTP support for them. |
+| `ProxyPass` | Forwards every request received on `/` to the backend. `simpleapi` is the backend container's name, which Docker resolves because both containers are on `app-network`. |
+| `ProxyPassReverse` | Rewrites the `Location` headers of the backend's redirects so they point to the proxy, not to the internal backend address. |
+| `ProxyPreserveHost On` | Keeps the client's original `Host` header when forwarding the request. |
 
 ### 1-6 Why is docker-compose so important?
 
-Without Compose, the whole stack needs about ten commands run by hand, in the right order and with the right options: create the network, build three images, run three containers with their names, volumes, ports and network. Docker Compose describes all of that in a single file (`docker-compose.yml`) and runs it with one command.
+Without Compose, starting the stack means about **ten commands typed by hand**, in the right order, with the right options: create the network, build three images, run three containers with their names, volumes, ports and network. Forget one `--network` and nothing works.
 
-- **One command for the whole stack:** `docker compose up --build` builds the images, creates the network and the volume, and starts the containers in the right order.
-- **Configuration as code:** the setup is written in a file versioned in Git, so it is documented, reviewable and the same for everyone (no forgotten `--network` or `-v` option).
-- **Reproducible:** any developer (or CI) gets the exact same environment by cloning the repository.
-- **Dependencies between services:** `depends_on` defines the start order (database, then API, then proxy).
-- **Easy to manage:** stop, restart, rebuild, read the logs or remove the whole application at once instead of container by container.
+Compose puts all of that in a single file, `docker-compose.yml`, and runs it with **one command**.
+
+- **One command for everything:** `docker compose up --build` builds the images, creates the network and the volume, and starts the containers in order.
+- **Config as code:** the setup lives in a file versioned in Git. It's documented, reviewable and identical for everyone.
+- **Reproducible:** any developer (or the CI) gets the exact same environment just by cloning the repo.
+- **Start order handled:** `depends_on` starts the database, then the API, then the proxy.
+- **Easy to manage:** stop, restart, rebuild, read logs or delete the whole app at once instead of container by container.
 
 ### 1-7 Document docker-compose most important commands.
 
-```bash
-# Build the images (if needed) and start all the services in the background
-docker compose up -d --build
-
-# List the containers of the project and their status
-docker compose ps
-
-# Show the logs of all services (-f to follow), or of one service
-docker compose logs -f
-docker compose logs backend
-
-# Rebuild the images without starting them
-docker compose build
-
-# Restart one service, or stop / start the stack without removing it
-docker compose restart backend
-docker compose stop
-docker compose start
-
-# Run a command inside a running service
-docker compose exec database sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
-
-# Stop and remove the containers and the network (-v also removes the volumes, so the data)
-docker compose down
-docker compose down -v
-
-# Check the docker-compose.yml file and print the final config
-docker compose config
-```
+| Command | What it does |
+|---------|--------------|
+| `docker compose up -d --build` | Builds the images if needed and starts everything in the background. |
+| `docker compose ps` | Lists the project's containers and their status. |
+| `docker compose logs -f` | Shows the logs of all services and keeps following them. |
+| `docker compose logs backend` | Shows the logs of one service only. |
+| `docker compose build` | Rebuilds the images without starting them. |
+| `docker compose restart backend` | Restarts one service. |
+| `docker compose stop` / `start` | Stops / starts the stack without removing anything. |
+| `docker compose exec database sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"'` | Runs a command inside a running service (here: opens a Postgres shell). |
+| `docker compose down` | Stops and removes the containers and the network. |
+| `docker compose down -v` | Same, **but also deletes the volumes, so all the data**. |
+| `docker compose config` | Checks `docker-compose.yml` and prints the final config. |
 
 ### 1-8 Document your docker-compose file.
 
@@ -269,22 +282,38 @@ volumes:
   db-data:
 ```
 
-- `services`: the three containers of the application. Compose names the containers `devopsapp-<service>-1` and each service can be reached by the others with its service name.
-- `backend`: the Spring Boot API.
-  - `build: ./Backend`: build the image from the multistage `Dockerfile` in `Backend/` (see 1-4).
-  - `env_file: .env`: give the database name, user and password to the API, used by `application.yml` (`${POSTGRES_DB}`, `${POSTGRES_USER}`, `${POSTGRES_PASSWORD}`).
-  - `networks`: on `app-network` to be reached by the proxy, and on `db-network` to reach the database.
-  - `depends_on: database`: start the database before the API.
-  - `restart: unless-stopped`: restart the API if it crashes (for example if it started before Postgres was ready), unless it was stopped by hand.
-- `database`: the Postgres database.
-  - `build: ./DataBase`: build the image that runs the SQL scripts at the first start (see 1-3).
-  - `env_file: .env`: create the database with the name, user and password of `.env`.
-  - `volumes: db-data:/var/lib/postgresql/data`: keep the data in a named volume, so it is not lost when the container is removed (see 1-2). It is reached by the API as `database:5432`, the host of `application.yml`.
-- `httpd`: the Apache reverse proxy.
-  - `build: ./HttpServer`: build the image with our `httpd.conf` (see 1-5).
-  - `ports: "80:80"`: the only port published on the host: everything goes through the proxy, the API and the database are not reachable from outside.
-  - `depends_on: backend`: start the API before the proxy.
-- `networks`: two bridge networks created by Compose. `app-network` connects the proxy and the API, `db-network` connects the API and the database, so the proxy cannot reach the database.
-- `volumes: db-data`: the named volume created by Compose (`devopsapp_db-data`).
+The file declares **three services**. Compose names the containers `devopsapp-<service>-1`, and each service can reach the others just by using their service name.
 
-Note: `depends_on` only waits for the container to be started, not for the application to be ready (Postgres may still be starting when the API starts).
+**`backend`: the Spring Boot API**
+
+| Option | Why |
+|--------|-----|
+| `build: ./Backend` | Builds the image from the multistage `Dockerfile` in `Backend/` (see 1-4). |
+| `env_file: .env` | Gives the API the database name, user and password, used in `application.yml` as `${POSTGRES_DB}`, `${POSTGRES_USER}`, `${POSTGRES_PASSWORD}`. |
+| `networks` | On `app-network` so the proxy can reach it, and on `db-network` so it can reach the database. |
+| `depends_on: database` | Starts the database first. |
+| `restart: unless-stopped` | Restarts the API if it crashes (for example if it started before Postgres was ready), unless you stopped it yourself. |
+
+**`database`: Postgres**
+
+| Option | Why |
+|--------|-----|
+| `build: ./DataBase` | Builds the image that runs the SQL scripts on first start (see 1-3). |
+| `env_file: .env` | Creates the database with the name, user and password from `.env`. |
+| `volumes: db-data:/var/lib/postgresql/data` | Keeps the data in a named volume so it survives the container being removed (see 1-2). |
+| `networks: db-network` | Only on the database network. The API reaches it as `database:5432`, the host set in `application.yml`. |
+
+**`httpd`: the Apache reverse proxy**
+
+| Option | Why |
+|--------|-----|
+| `build: ./HttpServer` | Builds the image with our `httpd.conf` (see 1-5). |
+| `ports: "80:80"` | The **only** port published on the host. Everything goes through the proxy, the API and the database can't be reached from outside. |
+| `depends_on: backend` | Starts the API first. |
+
+**Networks and volumes**
+
+- `networks`: two bridge networks created by Compose. `app-network` links the proxy and the API, `db-network` links the API and the database. Result: **the proxy can't talk to the database directly.**
+- `volumes: db-data`: the named volume created by Compose (it shows up as `devopsapp_db-data`).
+
+> ⚠️ `depends_on` only waits for the container to **start**, not for the app inside to be **ready**. Postgres can still be booting when the API starts, which is why the backend has `restart: unless-stopped`.
