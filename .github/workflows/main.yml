@@ -5,6 +5,9 @@ on:
     branches:
       - main
       - develop
+    # a git tag like v1.0.0 publishes a versioned image
+    tags:
+      - 'v*'
   pull_request:
 
 jobs:
@@ -41,26 +44,63 @@ jobs:
       - name: Login to DockerHub
         run: echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login --username ${{ secrets.DOCKERHUB_USERNAME }} --password-stdin
 
+      # image tags: 1.2.3 and 1.2 on a v1.2.3 git tag, latest on main, sha-xxxxxxx always
+      - name: Docker metadata backend
+        id: meta-backend
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ secrets.DOCKERHUB_USERNAME }}/tp-devops-simple-api
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha
+            type=raw,value=latest,enable={{is_default_branch}}
+
       - name: Build image and push backend
         uses: docker/build-push-action@v6
         with:
           # relative path to the place where source code with Dockerfile is located
           context: ./Backend
           # Note: tags has to be all lower-case
-          tags: ${{ secrets.DOCKERHUB_USERNAME }}/tp-devops-simple-api:latest
-          # build on feature branches, push only on main branch
-          push: ${{ github.ref == 'refs/heads/main' }}
+          tags: ${{ steps.meta-backend.outputs.tags }}
+          labels: ${{ steps.meta-backend.outputs.labels }}
+          # build on feature branches, push only on main branch and version tags
+          push: ${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') }}
+
+      - name: Docker metadata database
+        id: meta-database
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ secrets.DOCKERHUB_USERNAME }}/tp-devops-database
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha
+            type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build image and push database
         uses: docker/build-push-action@v6
         with:
           context: ./DataBase
-          tags: ${{ secrets.DOCKERHUB_USERNAME }}/tp-devops-database:latest
-          push: ${{ github.ref == 'refs/heads/main' }}
+          tags: ${{ steps.meta-database.outputs.tags }}
+          labels: ${{ steps.meta-database.outputs.labels }}
+          push: ${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') }}
+
+      - name: Docker metadata httpd
+        id: meta-httpd
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ secrets.DOCKERHUB_USERNAME }}/tp-devops-httpd
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha
+            type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build image and push httpd
         uses: docker/build-push-action@v6
         with:
           context: ./HttpServer
-          tags: ${{ secrets.DOCKERHUB_USERNAME }}/tp-devops-httpd:latest
-          push: ${{ github.ref == 'refs/heads/main' }}
+          tags: ${{ steps.meta-httpd.outputs.tags }}
+          labels: ${{ steps.meta-httpd.outputs.labels }}
+          push: ${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') }}
