@@ -476,3 +476,28 @@ Each part of the app has its own role, run in this order: `docker` → `create_n
 | `ports: "80:80"` | Only on the proxy: the single entry point from outside. |
 
 Run with: `ansible-playbook -i inventories/setup.yml playbook.yml --ask-vault-pass`
+
+### Is it really safe to deploy automatically every new image on the hub? What can I do to make it more secure?
+
+**Not completely.** With continuous deployment, every image pushed on `main` goes straight to production with no human check. The tests protect us against obvious bugs, but:
+
+- **Tests don't catch everything:** a bug that no test covers, a performance problem or a broken database migration still reaches production.
+- **A bad merge is enough:** anyone who can push on `main` (or a compromised GitHub account) can deploy any code to the server.
+- **Secrets in the CI:** the workflow holds the SSH key and the vault password. If they leak, an attacker gets full access to the server.
+- **`latest` is a moving tag:** we don't know exactly which version runs, and the image on Docker Hub could be replaced without the code changing.
+- **No rollback:** if the new version is broken, the app stays down until someone fixes it.
+
+**How to make it safer:**
+
+| Measure | Why |
+|---------|-----|
+| Protect `main` (pull requests + required review + required checks) | Nothing is deployed without being reviewed and tested. |
+| Deploy only on version tags (`v1.2.3`) instead of every push on `main` | Deploying becomes a deliberate decision. |
+| Use fixed image tags (version or commit SHA) instead of `latest` | We know exactly what runs, and rolling back = redeploying the previous tag. |
+| GitHub **Environments** with required reviewers | A manual "approve" button before the `deploy` job runs. |
+| Deploy to a **staging** server first | Test the real deployment before production. |
+| Scan the images (Trivy, Docker Scout) and the dependencies (OWASP Dependency-Check) | Block images with known vulnerabilities. |
+| Limit the secrets | A dedicated SSH key and user for the CI, secrets scoped to the deployment environment, Docker Hub token with minimal rights. |
+| Health check after deployment | Check the app answers (e.g. `curl`), and redeploy the previous version if not. |
+
+In short: automatic deployment is safe **only if the pipeline is trusted**. We keep the automation, but add controls before it (reviews, tests, scans, approval) and a way back after it (fixed tags, rollback).

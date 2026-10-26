@@ -17,6 +17,11 @@ services:
     networks:
       - db-network
 
+  front:
+    build: ./Frontend
+    networks:
+      - app-network
+
   httpd:
     build: ./HttpServer
     ports:
@@ -25,6 +30,7 @@ services:
       - app-network
     depends_on:
       - backend
+      - front
 
 networks:
   app-network:
