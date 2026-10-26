@@ -135,3 +135,28 @@ jobs:
           tags: ${{ steps.meta-httpd.outputs.tags }}
           labels: ${{ steps.meta-httpd.outputs.labels }}
           push: ${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') }}
+
+  deploy:
+    needs: build-and-push-docker-image
+    # deploy only when images are pushed (same condition as the push)
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Ansible
+        run: pip install ansible
+
+      - name: Set up SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa_takima
+          chmod 600 ~/.ssh/id_rsa_takima
+          ssh-keyscan bastien.conrad.takima.school >> ~/.ssh/known_hosts
+
+      - name: Run playbook
+        working-directory: ./ansible
+        run: |
+          echo "${{ secrets.VAULT_PASSWORD }}" > vault_pass.txt
+          ansible-playbook -i inventories/setup.yml playbook.yml --vault-password-file vault_pass.txt
+          rm vault_pass.txt
