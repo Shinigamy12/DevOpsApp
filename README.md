@@ -1,74 +1,42 @@
 ## How to run the project
 
-The app runs in 3 containers that talk to each other over a Docker network:
-
 | Container | Folder | Role |
 |-----------|--------|------|
 | `database` | `DataBase/` | Postgres database |
 | `simpleapi` | `Backend/` | Spring Boot API |
-| `httpserver` | `HttpServer/` | Apache reverse proxy, the only entry point |
-
-Adminer is optional, it's just handy to look inside the database.
+| `front` | `Frontend/` | Vue.js front (nginx) |
+| `httpd` | `HttpServer/` | Apache reverse proxy, the only entry point |
 
 ```
-Browser --:80--> httpserver (Apache) --> simpleapi:8080 (Spring Boot) --> database:5432 (Postgres)
+Browser --:80--> httpd --/-----> front
+                       --/api/--> simpleapi:8080 --> database:5432
 ```
 
-**What you need:** only Docker. Java and Maven are not needed on your machine, the API is compiled inside Docker thanks to its multistage `Dockerfile` (see 1-4).
+### Run locally
 
-**Before starting:** copy `.env.example` to `.env` and fill it in. It holds the database name, user and password. It is not committed, so the secrets never end up in Git.
-
-> The fastest way is `docker compose up -d --build` (see 1-6 to 1-8). The steps below do the same thing by hand.
-
-### 1. Create the network (only once)
+Only Docker is needed.
 
 ```bash
-docker network create app-network
+cp .env.example .env    # fill in POSTGRES_DB, POSTGRES_USER, POSTGRES_PASSWORD
+docker compose up -d --build
 ```
 
-### 2. Start the database
+- **http://localhost/**: the front.
+- **http://localhost/api/departments**: the API.
+- Problem? `docker compose ps` and `docker compose logs <service>`.
+
+> The front calls the API URL set in `Frontend/.env.production` (the production server). Change it to `localhost/api` to use the local API.
+
+### Deploy to the server
+
+Needs Ansible (in WSL on Windows), the server SSH key in `~/.ssh/id_rsa_takima` and the vault password.
 
 ```bash
-docker build -t bastien/database ./DataBase
-docker run -d -v db-data:/var/lib/postgresql/data --network app-network --env-file .env --name database bastien/database
+cd ansible
+ansible-playbook -i inventories/setup.yml playbook.yml --ask-vault-pass
 ```
 
-> ⚠️ The container **must** be called `database`. The API connects to `jdbc:postgresql://database:5432/${POSTGRES_DB}` (see `Backend/src/main/resources/application.yml`).
-
-### 3. Start the API
-
-```bash
-docker build -t bastien/simpleapi ./Backend
-docker run -d --name simpleapi --network app-network --env-file .env bastien/simpleapi
-```
-
-> ⚠️ The container **must** be called `simpleapi`, that's the name the reverse proxy looks for.
->
-> No `-p` here: the API is only reachable through the proxy. Add `-p 8080:8080` if you want to test it directly.
-
-### 4. Start the reverse proxy
-
-```bash
-docker build -t bastien/httpserver ./HttpServer
-docker run -d --name httpserver --network app-network -p 80:80 bastien/httpserver
-```
-
-### 5. Adminer (optional)
-
-```bash
-docker run -d -p "8090:8080" --net=app-network --name=adminer adminer
-```
-
-### Is it working?
-
-- **http://localhost/** should answer `{"id":1,"content":"Hello, World!"}` (the API, through the proxy).
-- **http://localhost:8090** opens Adminer. Log in with:
-  - System: `PostgreSQL`
-  - Server: `database`
-  - Username / Password / Database: `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` from your `.env`
-- Something doesn't answer? Check `docker ps` and `docker logs <container>`.
-
-> The start order matters: **database → API → proxy**.
+On every push to `main`, GitHub Actions tests the API, pushes the 4 images to Docker Hub and runs this playbook. Required repository secrets: `DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN`, `SSH_PRIVATE_KEY`, `VAULT_PASSWORD`.
 
 ---
 
@@ -234,9 +202,9 @@ Compose puts all of that in a single file, `docker-compose.yml`, and runs it wit
 | `docker compose up -d --build` | Builds the images if needed and starts everything in the background. |
 | `docker compose ps` | Lists the project's containers and their status. |
 | `docker compose logs -f` | Shows the logs of all services and keeps following them. |
-| `docker compose logs backend` | Shows the logs of one service only. |
+| `docker compose logs simpleapi` | Shows the logs of one service only. |
 | `docker compose build` | Rebuilds the images without starting them. |
-| `docker compose restart backend` | Restarts one service. |
+| `docker compose restart simpleapi` | Restarts one service. |
 | `docker compose stop` / `start` | Stops / starts the stack without removing anything. |
 | `docker compose exec database sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"'` | Runs a command inside a running service (here: opens a Postgres shell). |
 | `docker compose down` | Stops and removes the containers and the network. |
@@ -247,7 +215,7 @@ Compose puts all of that in a single file, `docker-compose.yml`, and runs it wit
 
 ```yaml
 services:
-  backend:
+  simpleapi:
     build: ./Backend
     env_file: .env
     networks:
@@ -265,6 +233,11 @@ services:
     networks:
       - db-network
 
+  front:
+    build: ./Frontend
+    networks:
+      - app-network
+
   httpd:
     build: ./HttpServer
     ports:
@@ -272,7 +245,8 @@ services:
     networks:
       - app-network
     depends_on:
-      - backend
+      - simpleapi
+      - front
 
 networks:
   app-network:
@@ -282,41 +256,50 @@ volumes:
   db-data:
 ```
 
-The file declares **three services**. Compose names the containers `devopsapp-<service>-1`, and each service can reach the others just by using their service name.
+The file declares **four services**. Each one can reach the others by its service name.
 
-**`backend`: the Spring Boot API**
+**`simpleapi`: the Spring Boot API**
 
 | Option | Why |
 |--------|-----|
-| `build: ./Backend` | Builds the image from the multistage `Dockerfile` in `Backend/` (see 1-4). |
-| `env_file: .env` | Gives the API the database name, user and password, used in `application.yml` as `${POSTGRES_DB}`, `${POSTGRES_USER}`, `${POSTGRES_PASSWORD}`. |
-| `networks` | On `app-network` so the proxy can reach it, and on `db-network` so it can reach the database. |
+| `build: ./Backend` | Builds the image from the multistage `Dockerfile` (see 1-4). |
+| `env_file: .env` | Database name, user and password, read in `application.yml`. |
+| `networks` | `app-network` to be reached by the proxy, `db-network` to reach the database. |
 | `depends_on: database` | Starts the database first. |
-| `restart: unless-stopped` | Restarts the API if it crashes (for example if it started before Postgres was ready), unless you stopped it yourself. |
+| `restart: unless-stopped` | Restarts the API if it crashes (e.g. started before Postgres was ready). |
+
+The service **must** be called `simpleapi`: it's the host name used in `httpd.conf`.
 
 **`database`: Postgres**
 
 | Option | Why |
 |--------|-----|
-| `build: ./DataBase` | Builds the image that runs the SQL scripts on first start (see 1-3). |
-| `env_file: .env` | Creates the database with the name, user and password from `.env`. |
-| `volumes: db-data:/var/lib/postgresql/data` | Keeps the data in a named volume so it survives the container being removed (see 1-2). |
-| `networks: db-network` | Only on the database network. The API reaches it as `database:5432`, the host set in `application.yml`. |
+| `build: ./DataBase` | Image that runs the SQL scripts on first start (see 1-3). |
+| `env_file: .env` | Creates the database with the credentials from `.env`. |
+| `volumes` | `db-data` keeps the data when the container is removed (see 1-2). |
+| `networks: db-network` | Only reachable by the API, as `database:5432`. |
+
+**`front`: the Vue.js front**
+
+| Option | Why |
+|--------|-----|
+| `build: ./Frontend` | Builds the app with Node, then serves it with nginx. |
+| `networks: app-network` | Only reachable through the proxy. |
 
 **`httpd`: the Apache reverse proxy**
 
 | Option | Why |
 |--------|-----|
-| `build: ./HttpServer` | Builds the image with our `httpd.conf` (see 1-5). |
-| `ports: "80:80"` | The **only** port published on the host. Everything goes through the proxy, the API and the database can't be reached from outside. |
-| `depends_on: backend` | Starts the API first. |
+| `build: ./HttpServer` | Image with our `httpd.conf`: `/api/` → `simpleapi`, `/` → `front` (see 1-5). |
+| `ports: "80:80"` | The **only** port published on the host. |
+| `depends_on` | Starts the API and the front first. |
 
 **Networks and volumes**
 
-- `networks`: two bridge networks created by Compose. `app-network` links the proxy and the API, `db-network` links the API and the database. Result: **the proxy can't talk to the database directly.**
-- `volumes: db-data`: the named volume created by Compose (it shows up as `devopsapp_db-data`).
+- `app-network`: proxy, front and API. `db-network`: API and database. **Only the API can talk to the database.**
+- `db-data`: named volume holding the database data.
 
-> ⚠️ `depends_on` only waits for the container to **start**, not for the app inside to be **ready**. Postgres can still be booting when the API starts, which is why the backend has `restart: unless-stopped`.
+> ⚠️ `depends_on` only waits for the container to **start**, not for the app inside to be **ready**, hence `restart: unless-stopped` on the API.
 
 ### 2-1 What are testcontainers?
 

@@ -1,5 +1,5 @@
 services:
-  backend:
+  simpleapi:
     build: ./Backend
     env_file: .env
     networks:
@@ -29,7 +29,7 @@ services:
     networks:
       - app-network
     depends_on:
-      - backend
+      - simpleapi
       - front
 
 networks:
