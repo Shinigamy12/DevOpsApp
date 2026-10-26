@@ -394,3 +394,85 @@ Building an image in the CI is not enough: the image only exists on the GitHub r
 - **History and rollback:** the registry keeps the images. With version tags (e.g. `1.0`, `1.1` or the commit SHA, not only `latest`), we can go back to a previous version in seconds if a new one is broken.
 
 In short: **the CI builds and tests, the registry stores, the servers pull and run.**
+
+### 3-1 Document your inventory and base commands
+
+Ansible runs from our machine (in WSL, since Ansible doesn't run natively on Windows) and connects to the server over SSH. Nothing has to be installed on the server except Python, which Debian already has.
+
+**Inventory** (`ansible/inventories/setup.yml`):
+
+```yaml
+all:
+  vars:
+    ansible_user: admin
+    ansible_ssh_private_key_file: ~/.ssh/id_rsa_takima
+    ansible_python_interpreter: /usr/bin/python3
+  children:
+    prod:
+      hosts:
+        bastien.conrad.takima.school:
+```
+
+- **`all`**: the root group, it contains every host.
+- **`vars`**: variables applied to all the hosts below:
+  - `ansible_user`: the user Ansible logs in with over SSH (`admin` on our Debian server).
+  - `ansible_ssh_private_key_file`: the private key used to connect. It stays in `~/.ssh` on the WSL side with `chmod 600`, **never in the repository**.
+  - `ansible_python_interpreter`: the Python to use on the server. Setting it removes the "discovered Python interpreter" warning.
+- **`children`**: sub-groups. Here `prod` contains our server, so we can target `all` or only `prod`.
+- **`hosts`**: the servers of the group, by domain name or IP.
+
+**Base commands** (run from the `ansible/` folder):
+
+| Command | What it does |
+|---------|--------------|
+| `ansible all -i inventories/setup.yml -m ping` | Checks that Ansible can connect to every host and run Python (answers `pong`). |
+| `ansible all -i inventories/setup.yml -m setup -a "filter=ansible_distribution*"` | Gathers *facts* about the server (here: the OS and its version). |
+| `ansible all -i inventories/setup.yml -m apt -a "name=apache2 state=present" --become` | Installs Apache. `--become` runs the task with `sudo`, needed to install packages. |
+| `ansible all -i inventories/setup.yml -m apt -a "name=apache2 state=absent" --become` | Removes Apache. |
+| `ansible all -i inventories/setup.yml -m shell -a "uptime"` | Runs any shell command on the hosts. |
+
+### 3-2 Document your playbook
+
+The playbook (`ansible/playbook.yml`) installs Docker on the server, following the [Docker documentation for Debian](https://docs.docker.com/engine/install/debian/#install-using-the-repository).
+
+```bash
+ansible-playbook -i inventories/setup.yml playbook.yml
+```
+
+**Header:**
+
+- `hosts: all`: runs on every host of the inventory.
+- `gather_facts: true`: collects info about the server first. We need it for `ansible_facts['distribution_release']` (the Debian version name, e.g. `bookworm`).
+- `become: true`: every task runs with `sudo`, required to install packages.
+
+**Tasks:**
+
+| Task | Module | Role |
+|------|--------|------|
+| Install required packages | `apt` | Installs the tools needed to add an external repository (`curl`, `ca-certificates`, `gnupg`...). `update_cache` runs `apt update` first. |
+| Add Docker GPG key | `apt_key` | Adds Docker's signing key so apt trusts its packages. |
+| Add Docker APT repository | `apt_repository` | Adds Docker's official repository, for the server's Debian version. |
+| Install Docker | `apt` | Installs `docker-ce`. |
+| Install Python3 and pip3 | `apt` | Makes sure Python and pip are present. |
+| Create a virtual environment | `command` | Creates `/opt/docker_venv`. `creates:` skips the task if the folder already exists. |
+| Install Docker SDK for Python | `command` | Installs the `docker` Python library, needed later by Ansible's Docker modules (`docker_container`...). |
+| Make sure Docker is running | `service` | Starts the Docker service. |
+
+The order matters: the key and the repository must be added before installing `docker-ce`, because the package isn't in Debian's default repositories.
+
+### 3-3 Document your docker_container tasks configuration.
+
+Each part of the app has its own role, run in this order: `docker` → `create_network` → `launch_database` → `launch_app` → `launch_proxy`.
+
+| Option | Role |
+|--------|------|
+| `name` | Container name, also its hostname on the network: `database` (used in the backend's JDBC URL) and `simpleapi` (used in `httpd.conf`). |
+| `image` | Image pulled from Docker Hub: `"{{ dockerhub_user }}/tp-devops-...:latest"`. |
+| `pull: true` | Always pulls the latest image, so a new push is deployed on the next run. |
+| `restart_policy: unless-stopped` | Restarts the container if it crashes or if the server reboots. |
+| `env` | Database credentials, read from `group_vars/all/vault.yml` (encrypted with Ansible Vault). |
+| `volumes` | `db-data` keeps the database data when the container is recreated. |
+| `networks` | `db-network`: database + API. `app-network`: API + proxy. The proxy can't reach the database. |
+| `ports: "80:80"` | Only on the proxy: the single entry point from outside. |
+
+Run with: `ansible-playbook -i inventories/setup.yml playbook.yml --ask-vault-pass`
