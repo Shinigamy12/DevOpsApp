@@ -430,3 +430,49 @@ all:
 | `ansible all -i inventories/setup.yml -m apt -a "name=apache2 state=present" --become` | Installs Apache. `--become` runs the task with `sudo`, needed to install packages. |
 | `ansible all -i inventories/setup.yml -m apt -a "name=apache2 state=absent" --become` | Removes Apache. |
 | `ansible all -i inventories/setup.yml -m shell -a "uptime"` | Runs any shell command on the hosts. |
+
+### 3-2 Document your playbook
+
+The playbook (`ansible/playbook.yml`) installs Docker on the server, following the [Docker documentation for Debian](https://docs.docker.com/engine/install/debian/#install-using-the-repository).
+
+```bash
+ansible-playbook -i inventories/setup.yml playbook.yml
+```
+
+**Header:**
+
+- `hosts: all`: runs on every host of the inventory.
+- `gather_facts: true`: collects info about the server first. We need it for `ansible_facts['distribution_release']` (the Debian version name, e.g. `bookworm`).
+- `become: true`: every task runs with `sudo`, required to install packages.
+
+**Tasks:**
+
+| Task | Module | Role |
+|------|--------|------|
+| Install required packages | `apt` | Installs the tools needed to add an external repository (`curl`, `ca-certificates`, `gnupg`...). `update_cache` runs `apt update` first. |
+| Add Docker GPG key | `apt_key` | Adds Docker's signing key so apt trusts its packages. |
+| Add Docker APT repository | `apt_repository` | Adds Docker's official repository, for the server's Debian version. |
+| Install Docker | `apt` | Installs `docker-ce`. |
+| Install Python3 and pip3 | `apt` | Makes sure Python and pip are present. |
+| Create a virtual environment | `command` | Creates `/opt/docker_venv`. `creates:` skips the task if the folder already exists. |
+| Install Docker SDK for Python | `command` | Installs the `docker` Python library, needed later by Ansible's Docker modules (`docker_container`...). |
+| Make sure Docker is running | `service` | Starts the Docker service. |
+
+The order matters: the key and the repository must be added before installing `docker-ce`, because the package isn't in Debian's default repositories.
+
+### 3-3 Document your docker_container tasks configuration.
+
+Each part of the app has its own role, run in this order: `docker` → `create_network` → `launch_database` → `launch_app` → `launch_proxy`.
+
+| Option | Role |
+|--------|------|
+| `name` | Container name, also its hostname on the network: `database` (used in the backend's JDBC URL) and `simpleapi` (used in `httpd.conf`). |
+| `image` | Image pulled from Docker Hub: `"{{ dockerhub_user }}/tp-devops-...:latest"`. |
+| `pull: true` | Always pulls the latest image, so a new push is deployed on the next run. |
+| `restart_policy: unless-stopped` | Restarts the container if it crashes or if the server reboots. |
+| `env` | Database credentials, read from `group_vars/all/vault.yml` (encrypted with Ansible Vault). |
+| `volumes` | `db-data` keeps the database data when the container is recreated. |
+| `networks` | `db-network`: database + API. `app-network`: API + proxy. The proxy can't reach the database. |
+| `ports: "80:80"` | Only on the proxy: the single entry point from outside. |
+
+Run with: `ansible-playbook -i inventories/setup.yml playbook.yml --ask-vault-pass`

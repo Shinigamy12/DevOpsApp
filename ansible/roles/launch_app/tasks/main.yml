@@ -1,0 +1,13 @@
+- name: Run backend
+  community.docker.docker_container:
+    name: simpleapi
+    image: "{{ dockerhub_user }}/tp-devops-simple-api:latest"
+    pull: true
+    restart_policy: unless-stopped
+    env:
+      POSTGRES_DB: "{{ postgres_db }}"
+      POSTGRES_USER: "{{ postgres_user }}"
+      POSTGRES_PASSWORD: "{{ postgres_password }}"
+    networks:
+      - name: app-network
+      - name: db-network
